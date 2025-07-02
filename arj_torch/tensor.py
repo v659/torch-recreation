@@ -1,29 +1,21 @@
 import math
 
-
 class ArjTensor:
     def __init__(self, data, requires_grad=False, _children=(), _op=""):
-        self.data = data
+        self.data = data  # scalar only for now
         self.requires_grad = requires_grad
-        self.grad = 0.0  # for scalars
-        self._backward = lambda: None  # a function to compute local gradient
+        self.grad = 0.0  # scalar gradient only
+        self._backward = lambda: None
         self._prev = set(_children)
-        self._op = _op  # operation that produced this tensor (optional debug)
-
-    def __getitem__(self, idx):
-        val = self.data[idx]
-        if isinstance(val, list):
-            return ArjTensor(val)
-        return val
-
+        self._op = _op
 
     def __repr__(self):
         return f"Tensor(data={self.data}, grad={self.grad})"
 
     def __add__(self, other):
         other = other if isinstance(other, ArjTensor) else ArjTensor(other)
-        out = ArjTensor(self.data + other.data, requires_grad=self.requires_grad or other.requires_grad,
-                        _children=(self, other), _op="+")
+
+        out = ArjTensor(self.data + other.data, requires_grad=self.requires_grad or other.requires_grad, _children=(self, other), _op='+')
 
         def _backward():
             if self.requires_grad:
@@ -34,10 +26,13 @@ class ArjTensor:
         out._backward = _backward
         return out
 
+    def __sub__(self, other):
+        return self + (other * -1)
+
     def __mul__(self, other):
         other = other if isinstance(other, ArjTensor) else ArjTensor(other)
-        out = ArjTensor(self.data * other.data, requires_grad=self.requires_grad or other.requires_grad,
-                        _children=(self, other), _op="*")
+
+        out = ArjTensor(self.data * other.data, requires_grad=self.requires_grad or other.requires_grad, _children=(self, other), _op='*')
 
         def _backward():
             if self.requires_grad:
@@ -49,9 +44,8 @@ class ArjTensor:
         return out
 
     def tanh(self):
-        x = self.data
-        t = math.tanh(x)
-        out = ArjTensor(t, requires_grad=self.requires_grad, _children=(self,), _op="tanh")
+        t = math.tanh(self.data)
+        out = ArjTensor(t, requires_grad=self.requires_grad, _children=(self,), _op='tanh')
 
         def _backward():
             if self.requires_grad:
@@ -64,12 +58,10 @@ class ArjTensor:
         if not self.requires_grad:
             return
 
-        if grad is None:
-            grad = 1.0
+        # Initialize gradient
+        self.grad = 1.0 if grad is None else grad
 
-        self.grad = grad
-
-        # Do a topological sort of the computation graph
+        # Topological order
         topo = []
         visited = set()
 
@@ -82,5 +74,6 @@ class ArjTensor:
 
         build_topo(self)
 
+        # Backpropagate
         for t in reversed(topo):
             t._backward()
