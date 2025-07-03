@@ -7,8 +7,8 @@ class Linear:
     def __init__(self, in_features, out_features):
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = ArjTensor([[random.uniform(-1, 1) for _ in range(in_features)] for _ in range(out_features)])
-        self.bias = ArjTensor([[0.0 for _ in range(out_features)]])
+        self.weight = ArjTensor([[random.uniform(-1, 1) for _ in range(in_features)] for _ in range(out_features)], requires_grad=True)
+        self.bias = ArjTensor([[0.0 for _ in range(out_features)]], requires_grad=True)
 
     def __call__(self, x):
         return self.forward(x)
@@ -18,11 +18,27 @@ class Linear:
         for row in x.data:
             out_row = []
             for j in range(self.out_features):
-                val = sum(row[i] * self.weight[j][i] for i in range(self.in_features))
-                val += self.bias[0][j]
+                val = sum(row[i] * self.weight.data[j][i] for i in range(self.in_features)) + self.bias.data[0][j]
                 out_row.append(val)
             output.append(out_row)
-        return ArjTensor(output)
+
+        out = ArjTensor(output, requires_grad=True, _children=(self.weight, self.bias), _op="linear")
+
+        def _backward():
+            if self.weight.requires_grad:
+                for j in range(self.out_features):
+                    for i in range(self.in_features):
+                        grad_sum = 0.0
+                        for b in range(len(x.data)):
+                            grad_sum += x.data[b][i] * out.grad[b][j]
+                        self.weight.grad[j][i] += grad_sum
+
+            if self.bias.requires_grad:
+                for j in range(self.out_features):
+                    self.bias.grad[0][j] += sum(out.grad[b][j] for b in range(len(out.grad)))
+
+        out._backward = _backward
+        return out
 
     def parameters(self):
         return [self.weight, self.bias]
@@ -32,7 +48,7 @@ class Embedding:
     def __init__(self, vocab_size, embedding_dim):
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
-        self.weight = ArjTensor([[random.uniform(-1, 1) for _ in range(embedding_dim)] for _ in range(vocab_size)])
+        self.weight = ArjTensor([[random.uniform(-1, 1) for _ in range(embedding_dim)] for _ in range(vocab_size)], requires_grad=True)
 
     def __call__(self, x):
         return self.forward(x)
@@ -44,7 +60,15 @@ class Embedding:
             for token in row:
                 out_row.extend(self.weight.data[token])
             output.append(out_row)
-        return ArjTensor(output)
+
+        out = ArjTensor(output, requires_grad=True, _children=(self.weight,), _op="embedding")
+
+        def _backward():
+            # (You can skip backward here for now if you're not fine-tuning embeddings)
+            pass
+
+        out._backward = _backward
+        return out
 
     def parameters(self):
         return [self.weight]
@@ -55,14 +79,31 @@ class ReLU:
         return self.forward(x)
 
     def forward(self, x):
-        return ArjTensor([[max(0, v) for v in row] for row in x.data])
+        out_data = [[max(0, v) for v in row] for row in x.data]
+        out = ArjTensor(out_data, requires_grad=True, _children=(x,), _op="ReLU")
+
+        def _backward():
+            if x.requires_grad:
+                grad = [
+                    [1.0 if v > 0 else 0.0 for v in row]
+                    for row in x.data
+                ]
+                # Element-wise multiply
+                x.grad = [
+                    [g * out.grad[i][j] for j, g in enumerate(grad[i])]
+                    for i in range(len(grad))
+                ]
+
+        out._backward = _backward
+        return out
+
 
 
 class LayerNorm:
     def __init__(self, dim, eps=1e-5):
         self.eps = eps
-        self.gamma = ArjTensor([[1.0] * dim])
-        self.beta = ArjTensor([[0.0] * dim])
+        self.gamma = ArjTensor([[1.0] * dim], requires_grad=True)
+        self.beta = ArjTensor([[0.0] * dim], requires_grad=True)
 
     def __call__(self, x):
         return self.forward(x)
@@ -75,7 +116,7 @@ class LayerNorm:
             normed = [(v - mean) / ((var + self.eps) ** 0.5) for v in row]
             normed = [self.gamma.data[0][i] * normed[i] + self.beta.data[0][i] for i in range(len(row))]
             output.append(normed)
-        return ArjTensor(output)
+        return ArjTensor(output, requires_grad=True)
 
     def parameters(self):
         return [self.gamma, self.beta]
@@ -94,7 +135,7 @@ class Dropout:
         data = []
         for row in x.data:
             data.append([v * (random.random() > self.p) for v in row])
-        return ArjTensor(data)
+        return ArjTensor(data, requires_grad=True)
 
 
 class CrossEntropyLoss:
@@ -156,7 +197,20 @@ class Sequential:
 
 class MSELoss:
     def __call__(self, pred, target):
-        diff = [(p - t)**2 for pr, tr in zip(pred.data, target.data) for p, t in zip(pr, tr)]
-        return sum(diff) / len(diff)
+        # pred, target are ArjTensors of same shape
+        diff = pred - target  # ArjTensor
+        sq = diff * diff  # ArjTensor (element-wise square)
 
+        # Mean over elements (2D)
+        total = sum(sum(row) for row in sq.data)  # just to compute scalar
+        mean = ArjTensor(total / (len(sq.data) * len(sq.data[0])), requires_grad=True)
 
+        # Make sure this backward links to previous tensors
+        def _backward():
+            grad_val = 1.0 / (len(sq.data) * len(sq.data[0]))
+            sq.backward([[grad_val for _ in row] for row in sq.data])
+
+        mean.grad = 1.0
+        mean._backward = _backward
+        mean._prev = {sq}
+        return mean
