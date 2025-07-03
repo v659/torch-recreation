@@ -143,16 +143,36 @@ class CrossEntropyLoss:
         return self.forward(logits, targets)
 
     def forward(self, logits, targets):
-        losses = []
-        for i in range(len(logits.data)):
-            logit_row = logits.data[i]
-            target_idx = targets.data[i][0] if isinstance(targets.data[i], list) else targets.data[i]
-            max_logit = max(logit_row)
-            exps = [math.exp(l - max_logit) for l in logit_row]
-            log_sum_exp = math.log(sum(exps))
-            loss = - (logit_row[target_idx] - max_logit - log_sum_exp)
-            losses.append(loss)
-        return sum(losses) / len(losses)
+        batch_size = len(logits.data)
+        loss_sum = 0.0
+        grads = [[0.0 for _ in row] for row in logits.data]
+
+        for i in range(batch_size):
+            row = logits.data[i]
+            target = targets.data[i][0] if isinstance(targets.data[i], list) else targets.data[i]
+            max_logit = max(row)
+            exps = [math.exp(x - max_logit) for x in row]
+            sum_exps = sum(exps)
+            probs = [e / sum_exps for e in exps]
+            log_prob = math.log(probs[target])
+            loss_sum -= log_prob
+
+            # compute softmax gradient
+            for j in range(len(row)):
+                grads[i][j] = probs[j]
+            grads[i][target] -= 1  # ∂L/∂logit = softmax - target
+
+        avg_loss = loss_sum / batch_size
+        out = ArjTensor(avg_loss, requires_grad=True)
+
+        def _backward():
+            if logits.requires_grad:
+                scale = 1.0 / batch_size
+                logits.grad = [[g * scale for g in row] for row in grads]
+
+        out._backward = _backward
+        out._prev = {logits}
+        return out
 
 
 class SGD:
@@ -214,3 +234,18 @@ class MSELoss:
         mean._backward = _backward
         mean._prev = {sq}
         return mean
+
+
+def softmax(logits):
+    """
+    logits: ArjTensor of shape (batch_size, num_classes)
+    Returns: ArjTensor of same shape with softmax probabilities
+    """
+    out = []
+    for row in logits.data:
+        max_val = max(row)
+        exps = [math.exp(x - max_val) for x in row]
+        sum_exps = sum(exps)
+        out.append([x / sum_exps for x in exps])
+    return ArjTensor(out, requires_grad=True, _children=(logits,), _op="softmax")
+
