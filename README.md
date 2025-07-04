@@ -9,6 +9,11 @@ This is a replica of Tensors in torch, and has multiple funcitons. Included in t
 
 Has linear, Embedding, LayerNorm, Relu, Sequential, SGD/Adam, CrossEntropyLoss, MSELoss, and softmax
 
+## Transformer.py
+
+Transformer with Self-Attention
+
+
 ## Main.py
 
 Example in which you can train the model to predict number sequences
