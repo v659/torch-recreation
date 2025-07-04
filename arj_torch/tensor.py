@@ -109,6 +109,51 @@ class ArjTensor:
         out._backward = _backward
         return out
 
+    def __rmul__(self, other):
+        return self * other
+
+    def __truediv__(self, other):
+        if isinstance(other, (int, float)):
+            out_data = [[x / other for x in row] for row in self.data]
+            return ArjTensor(out_data, requires_grad=self.requires_grad, _children=(self,), _op='div_scalar')
+
+        elif isinstance(other, ArjTensor):
+            out_data = [
+                [a / b for a, b in zip(row_a, row_b)]
+                for row_a, row_b in zip(self.data, other.data)
+            ]
+            return ArjTensor(out_data, requires_grad=self.requires_grad or other.requires_grad, _children=(self, other),
+                             _op='div_tensor')
+
+        else:
+            raise TypeError(f"Unsupported divisor type: {type(other)}")
+
+    def __rtruediv__(self, other):
+        # scalar / tensor (rare, but for completeness)
+        if isinstance(other, (int, float)):
+            out = [[other / x for x in row] for row in self.data]
+            return ArjTensor(out, requires_grad=self.requires_grad, _children=(self,), _op='r/')
+        else:
+            raise NotImplementedError("Only scalar / tensor supported.")
+
+    def sqrt(self):
+        import math
+        out_data = [[math.sqrt(x) for x in row] for row in self.data]
+        out = ArjTensor(out_data, requires_grad=self.requires_grad, _children=(self,), _op='sqrt')
+
+        def _backward():
+            if self.requires_grad:
+                grad_out = out.grad
+                self_grad = [
+                    [0.5 * go / math.sqrt(x) for go, x in zip(grad_row, row)]
+                    for grad_row, row in zip(grad_out, self.data)
+                ]
+                self._add_grad(self_grad)
+
+        out._backward = _backward
+        return out
+
+
     def tanh(self):
         x = self.data
         t = math.tanh(x)
