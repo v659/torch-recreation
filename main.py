@@ -39,4 +39,4 @@ input_tensor = ArjTensor(norm_input, requires_grad=False)
 output = model(input_tensor)
 prediction = output.data[0][0] * 100  # De-normalize
 
-print(f"📊 Predicted next number: {prediction:.2f}")
+print(f"📊 Predicted next number: {round(prediction):.2f}")
