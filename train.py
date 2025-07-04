@@ -3,7 +3,19 @@ from arj_torch.nn import Linear, ReLU, LayerNorm, MSELoss, SGD, Sequential, Embe
 import random
 import matplotlib.pyplot as plt
 from arj_torch.transformer import PatternTransformer
+import json
 
+
+def save_model(model, path):
+    params = []
+    for p in model.parameters():
+        params.append({
+            'data': p.data,
+            'requires_grad': p.requires_grad
+        })
+    with open(path, 'w') as f:
+        json.dump(params, f)
+    print(f"✅ Model saved to {path}")
 
 # === Pattern Dataset ===
 def generate_pattern_sample():
@@ -119,6 +131,8 @@ for epoch in range(1, 10001):
         print_weight_equations(epoch + 1, lr = 0.01, param_count = len(model.parameters()))
         for seq, out, target in zip(test_samples, pred.data, actual):
             print(f"{seq} → predicted: {out[0] * 100:.2f} | actual: {target:.2f}")
+        save_model(model, 'pattern_model.json')
+        print("Model saved")
         update_plot(epoch)
         plt.pause(0.01)
 
@@ -127,6 +141,8 @@ print("\n--- Final Predictions ---")
 final_pred = model(test_tensor)
 for seq, out, target in zip(test_samples, final_pred.data, actual):
     print(f"{seq} → predicted: {out[0] * 100:.2f} | actual: {target:.2f}")
+save_model(model, 'pattern_model.json')
+print("Model saved")
 plt.show()
 
 
