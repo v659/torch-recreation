@@ -1,195 +1,106 @@
-import math
-
+import numpy as np
 
 class ArjTensor:
     def __init__(self, data, requires_grad=False, _children=(), _op=""):
-        self.data = data
+        self.data = np.array(data, dtype=np.float32) if not isinstance(data, np.ndarray) else data
         self.requires_grad = requires_grad
-        self.grad = self._zeros_like(data) if requires_grad else None
+        self.grad = np.zeros_like(self.data) if requires_grad else None
         self._backward = lambda: None
         self._prev = set(_children)
         self._op = _op
 
-    def _zeros_like(self, data):
-        if isinstance(data, float):
-            return 0.0
-        elif isinstance(data, list):
-            return [[0.0 for _ in row] for row in data]
-        else:
-            raise TypeError("Unsupported data type for grad")
-
-    def _add_grads(self, a, b):
-        if isinstance(a, float):
-            return a + b
-        elif isinstance(a, list):
-            return [[a[i][j] + b[i][j] for j in range(len(a[0]))] for i in range(len(a))]
-        else:
-            raise TypeError("Unsupported grad type")
-
-    def __getitem__(self, idx):
-        val = self.data[idx]
-        if isinstance(val, list):
-            return ArjTensor(val)
-        return val
-
     def __repr__(self):
-        return f"Tensor(data={self.data}, grad={self.grad})"
+        return f"ArjTensor(data={self.data}, grad={self.grad})"
+
+    def zero_grad(self):
+        if self.requires_grad:
+            self.grad = np.zeros_like(self.data)
+
+    def _add_grad(self, current, new):
+        return current + new if current is not None else new
 
     def __add__(self, other):
         other = other if isinstance(other, ArjTensor) else ArjTensor(other)
-
-        if isinstance(self.data, float) and isinstance(other.data, float):
-            out_data = self.data + other.data
-        elif isinstance(self.data, list) and isinstance(other.data, float):
-            out_data = [[val + other.data for val in row] for row in self.data]
-        elif isinstance(self.data, float) and isinstance(other.data, list):
-            out_data = [[self.data + val for val in row] for row in other.data]
-        elif isinstance(self.data, list) and isinstance(other.data, list):
-            out_data = [
-                [self.data[i][j] + other.data[i][j] for j in range(len(self.data[0]))]
-                for i in range(len(self.data))
-            ]
-        else:
-            raise TypeError("Unsupported types in __add__")
-
-        out = ArjTensor(out_data, requires_grad=self.requires_grad or other.requires_grad,
-                        _children=(self, other), _op="+")
+        out = ArjTensor(self.data + other.data, requires_grad=self.requires_grad or other.requires_grad, _children=(self, other), _op='+')
 
         def _backward():
             if self.requires_grad:
-                self.grad = self._add_grads(self.grad, out.grad)
+                self.grad = self._add_grad(self.grad, out.grad)
             if other.requires_grad:
-                other.grad = self._add_grads(other.grad, out.grad)
+                other.grad = self._add_grad(other.grad, out.grad)
 
         out._backward = _backward
         return out
 
     def __sub__(self, other):
-        return self + (other * -1)
+        return self + (-other)
+
+    def __neg__(self):
+        return self * -1
 
     def __mul__(self, other):
-        if not isinstance(other, ArjTensor):
-            other = ArjTensor(float(other))  # convert int to float inside a tensor
-
-        if isinstance(self.data, float) and isinstance(other.data, float):
-            out_data = self.data * other.data
-        elif isinstance(self.data, list) and isinstance(other.data, float):
-            out_data = [[val * other.data for val in row] for row in self.data]
-        elif isinstance(self.data, float) and isinstance(other.data, list):
-            out_data = [[self.data * val for val in row] for row in other.data]
-        elif isinstance(self.data, list) and isinstance(other.data, list):
-            out_data = [
-                [self.data[i][j] * other.data[i][j] for j in range(len(self.data[0]))]
-                for i in range(len(self.data))
-            ]
-        else:
-            raise TypeError(f"Unsupported types in __mul__: {type(self.data)}, {type(other.data)}, {other.data}")
-
-        out = ArjTensor(out_data, requires_grad=self.requires_grad or other.requires_grad,
-                        _children=(self, other), _op="*")
+        other = other if isinstance(other, ArjTensor) else ArjTensor(other)
+        out = ArjTensor(self.data * other.data, requires_grad=self.requires_grad or other.requires_grad, _children=(self, other), _op='*')
 
         def _backward():
-            if self.requires_grad and isinstance(out.grad, list):
-                if isinstance(other.data, float):
-                    grad = [[other.data * out.grad[i][j] for j in range(len(out.grad[0]))] for i in
-                            range(len(out.grad))]
-                else:
-                    grad = [[other.data[i][j] * out.grad[i][j] for j in range(len(out.grad[0]))] for i in
-                            range(len(out.grad))]
-                self.grad = self._add_grads(self.grad, grad)
-
-            if other.requires_grad and isinstance(out.grad, list):
-                if isinstance(self.data, float):
-                    grad = [[self.data * out.grad[i][j] for j in range(len(out.grad[0]))] for i in range(len(out.grad))]
-                else:
-                    grad = [[self.data[i][j] * out.grad[i][j] for j in range(len(out.grad[0]))] for i in
-                            range(len(out.grad))]
-                other.grad = self._add_grads(other.grad, grad)
+            if self.requires_grad:
+                self.grad = self._add_grad(self.grad, other.data * out.grad)
+            if other.requires_grad:
+                other.grad = self._add_grad(other.grad, self.data * out.grad)
 
         out._backward = _backward
         return out
-
-    def __rmul__(self, other):
-        return self * other
 
     def __truediv__(self, other):
-        if isinstance(other, (int, float)):
-            out_data = [[x / other for x in row] for row in self.data]
-            return ArjTensor(out_data, requires_grad=self.requires_grad, _children=(self,), _op='div_scalar')
-
-        elif isinstance(other, ArjTensor):
-            out_data = [
-                [a / b for a, b in zip(row_a, row_b)]
-                for row_a, row_b in zip(self.data, other.data)
-            ]
-            return ArjTensor(out_data, requires_grad=self.requires_grad or other.requires_grad, _children=(self, other),
-                             _op='div_tensor')
-
-        else:
-            raise TypeError(f"Unsupported divisor type: {type(other)}")
-
-    def __rtruediv__(self, other):
-        # scalar / tensor (rare, but for completeness)
-        if isinstance(other, (int, float)):
-            out = [[other / x for x in row] for row in self.data]
-            return ArjTensor(out, requires_grad=self.requires_grad, _children=(self,), _op='r/')
-        else:
-            raise NotImplementedError("Only scalar / tensor supported.")
-
-    def sqrt(self):
-        import math
-        out_data = [[math.sqrt(x) for x in row] for row in self.data]
-        out = ArjTensor(out_data, requires_grad=self.requires_grad, _children=(self,), _op='sqrt')
+        other = other if isinstance(other, ArjTensor) else ArjTensor(other)
+        out = ArjTensor(self.data / other.data, requires_grad=self.requires_grad or other.requires_grad, _children=(self, other), _op='/')
 
         def _backward():
             if self.requires_grad:
-                grad_out = out.grad
-                self_grad = [
-                    [0.5 * go / math.sqrt(x) for go, x in zip(grad_row, row)]
-                    for grad_row, row in zip(grad_out, self.data)
-                ]
-                self._add_grad(self_grad)
+                self.grad = self._add_grad(self.grad, (1 / other.data) * out.grad)
+            if other.requires_grad:
+                other.grad = self._add_grad(other.grad, (-self.data / (other.data ** 2)) * out.grad)
 
         out._backward = _backward
         return out
 
-
     def tanh(self):
-        x = self.data
-        t = math.tanh(x)
-        out = ArjTensor(t, requires_grad=self.requires_grad, _children=(self,), _op="tanh")
+        t = np.tanh(self.data)
+        out = ArjTensor(t, requires_grad=self.requires_grad, _children=(self,), _op='tanh')
 
         def _backward():
             if self.requires_grad:
-                self.grad += (1 - t ** 2) * out.grad
+                self.grad = self._add_grad(self.grad, (1 - t ** 2) * out.grad)
+
+        out._backward = _backward
+        return out
+
+    def sqrt(self):
+        s = np.sqrt(self.data)
+        out = ArjTensor(s, requires_grad=self.requires_grad, _children=(self,), _op='sqrt')
+
+        def _backward():
+            if self.requires_grad:
+                self.grad = self._add_grad(self.grad, 0.5 / s * out.grad)
 
         out._backward = _backward
         return out
 
     def sum(self):
-        if isinstance(self.data, float):
-            return self  # already scalar
-
-        total = sum(sum(row) for row in self.data)
-        out = ArjTensor(total, requires_grad=self.requires_grad, _children=(self,), _op="sum")
+        out = ArjTensor(np.sum(self.data), requires_grad=self.requires_grad, _children=(self,), _op='sum')
 
         def _backward():
             if self.requires_grad:
-                grad = [[1.0 for _ in row] for row in self.data]
-                self.grad = self._add_grads(self.grad, grad)
+                self.grad = self._add_grad(self.grad, np.ones_like(self.data) * out.grad)
 
         out._backward = _backward
         return out
-
 
     def backward(self, grad=None):
         if not self.requires_grad:
             return
 
-        if grad is None:
-            grad = 1.0 if isinstance(self.data, float) else self._zeros_like(self.data)
-
-        self.grad = grad
+        self.grad = grad if grad is not None else np.ones_like(self.data)
 
         topo = []
         visited = set()
@@ -203,5 +114,13 @@ class ArjTensor:
 
         build_topo(self)
 
-        for t in reversed(topo):
-            t._backward()
+        for node in reversed(topo):
+            node._backward()
+
+    @property
+    def shape(self):
+        return self.data.shape
+
+    def __getitem__(self, idx):
+        sliced = self.data[idx]
+        return ArjTensor(sliced, requires_grad=self.requires_grad)

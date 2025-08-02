@@ -1,6 +1,5 @@
 from arj_torch.nn import *
-
-
+import numpy as np
 class SelfAttention:
     def __init__(self, embed_dim, num_heads=1):
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
@@ -20,54 +19,40 @@ class SelfAttention:
         B, T, C = len(x.data), len(x.data[0]), len(x.data[0][0])
         assert C == self.embed_dim, f"Expected input dim {self.embed_dim}, got {C}"
 
-        q = self.query(x)
+        # Step 1: Project input to q, k, v
+        q = self.query(x)  # ArjTensor
         k = self.key(x)
         v = self.value(x)
 
-        # Attention score computation
-        scores = []
-        for b in range(B):
-            score = []
-            for i in range(T):
-                row = []
-                for j in range(T):
-                    dot = sum(q.data[b][i][d] * k.data[b][j][d] for d in range(C))
-                    row.append(dot / math.sqrt(C))
-                score.append(row)
-            scores.append(score)
+        # Convert to NumPy
+        q_np = np.array(q.data)  # [B, T, C]
+        k_np = np.array(k.data)  # [B, T, C]
+        v_np = np.array(v.data)  # [B, T, C]
 
-        # Softmax attention weights
-        attn_weights = []
-        for score in scores:
-            soft = []
-            for row in score:
-                exps = [math.exp(s) for s in row]
-                s = sum(exps)
-                soft.append([e / s for e in exps])
-            attn_weights.append(soft)
+        # Step 2: Compute attention scores via batch matmul
+        scores = np.matmul(q_np, np.transpose(k_np, (0, 2, 1))) / math.sqrt(C)
+        mask = np.tril(np.ones((T, T), dtype=bool))  # Lower triangle
+        scores = np.where(mask[None, :, :], scores, -np.inf)
 
-        # Apply attention weights to value vectors
-        out = []
-        for b in range(B):
-            batch_out = []
-            for i in range(T):
-                out_vec = [0.0] * C
-                for j in range(T):
-                    for d in range(C):
-                        out_vec[d] += attn_weights[b][i][j] * v.data[b][j][d]
-                batch_out.append(out_vec)
-            out.append(batch_out)
+        # Step 3: Apply softmax (numerical stability)
+        scores -= np.max(scores, axis=-1, keepdims=True)
+        attn_weights = np.exp(scores)
+        attn_weights /= np.sum(attn_weights, axis=-1, keepdims=True)  # [B, T, T]
 
-        out_tensor = ArjTensor(out, requires_grad=True, _children=(x,), _op="attn")
+        # Step 4: Apply attention weights to v
+        out_np = np.matmul(attn_weights, v_np)  # [B, T, C]
+        # Step 5: Convert back to ArjTensor
+        out_tensor = ArjTensor(out_np.tolist(), requires_grad=True, _children=(x,), _op="attn")
 
-        # Apply final projection
+        # Step 6: Final linear projection
         proj_out = self.proj(out_tensor)
 
-        # ✅ Final shape check (important!)
+        # Final shape validation
         for row in proj_out.data:
             for token in row:
-                assert len(token) == self.embed_dim, f"Projected output dim mismatch: expected {self.embed_dim}," \
-                                                     f" got {len(token)}"
+                assert len(
+                    token) == self.embed_dim, f"Projected output dim mismatch: expected {self.embed_dim}, got {len(token)}"
+
 
         return proj_out
 
@@ -85,11 +70,8 @@ class TransformerBlock:
     def __init__(self, embed_dim, num_heads=1):
         self.attn = SelfAttention(embed_dim, num_heads)
         self.norm1 = LayerNorm(embed_dim)
-        self.ff = Sequential(
-            Linear(embed_dim, embed_dim * 2),  # 16 → 32
-            ReLU(),
-            Linear(embed_dim * 2, embed_dim)  # 32 → 16 ✅
-        )
+        self.ff = FeedForward(embed_dim, embed_dim * 4)
+
         self.norm2 = LayerNorm(embed_dim)  # Must match final FFN output dim
 
     def __call__(self, x):
@@ -98,7 +80,6 @@ class TransformerBlock:
     def forward(self, x):
         attn_out = self.attn(x)
         x = self.norm1(x + attn_out)
-
         ff_out = self.ff(x)
 
         for row in x.data:
@@ -114,42 +95,39 @@ class TransformerBlock:
 
 # === Full Model ===
 class PatternTransformer:
-    def __init__(self, seq_len=4, embed_dim=16, heads=1):
+    def __init__(self, seq_len=4, embed_dim=16, heads=1, layers=1):
         self.seq_len = seq_len
         self.embed_dim = embed_dim
+        self.layers = layers
 
-        # Project scalar inputs (1D per token) to embedding dim
-        self.input_proj = Linear(in_features=1, out_features=embed_dim)
-        self.transformer = TransformerBlock(embed_dim, heads)
-        self.output_proj = Linear(embed_dim, 1)
+        self.input_proj = Linear(in_features=embed_dim, out_features=embed_dim)
+
+        # Create multiple Transformer blocks
+        self.blocks = [TransformerBlock(embed_dim, heads) for _ in range(layers)]
+
+        self.output_proj = Linear(embed_dim, 1)  # Optional: used in some tasks
 
     def __call__(self, x):
         return self.forward(x)
 
-    def forward(self, x):  # x: (B, T)
-        # Convert (B, T) → (B, T, 1)
-        x = ArjTensor([[[v] for v in row] for row in x.data], requires_grad=True)
+    def forward(self, x):
 
-        # Apply input_proj to each (B, T, 1) → (B, T, embed_dim)
-        projected = []
+        x_np = np.array(x.data)
+        if x_np.ndim == 2:
+            x_np = np.expand_dims(x_np, axis=-1)  # (B, T) → (B, T, 1)
+        x = ArjTensor(x_np, requires_grad=True)
 
-        for row in x.data:
-            proj_row = []
-            for v in row:
-                proj_v = self.input_proj(ArjTensor([[v[0]]], requires_grad=True))
-                assert len(proj_v.data[
-                               0]) == self.embed_dim, f"Expected embedding dim={self.embed_dim}," \
-                                                      f" got {len(proj_v.data[0])}"
 
-                proj_row.append(proj_v.data[0])
-            projected.append(proj_row)
-        x = ArjTensor(projected, requires_grad=True)
+        x = self.input_proj(x)
 
-        # Transformer + output
-        x = self.transformer(x)                   # (B, T, embed_dim)
-        x = [row[-1] for row in x.data]           # use last token → (B, embed_dim)
-        x = ArjTensor(x, requires_grad=True)
-        return self.output_proj(x)                # (B, 1)
+        for i, block in enumerate(self.blocks):
+            x = block(x)
+
+        return x
 
     def parameters(self):
-        return self.input_proj.parameters() + self.transformer.parameters() + self.output_proj.parameters()
+        params = self.input_proj.parameters() + self.output_proj.parameters()
+        for block in self.blocks:
+            params += block.parameters()
+        return params
+
