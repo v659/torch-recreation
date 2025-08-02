@@ -1,157 +1,237 @@
+from datasets import load_dataset
 from arj_torch.tensor import ArjTensor
-from arj_torch.nn import Linear, ReLU, LayerNorm, MSELoss, SGD, Sequential, Embedding
-import random
-import matplotlib.pyplot as plt
+from arj_torch.nn import Embedding, Linear, LayerNorm, CrossEntropyLoss
 from arj_torch.transformer import PatternTransformer
-import json
+from arj_torch.optimizer import SGD
+import json, re, os
+import numpy as np
+import time
+import subprocess
+import atexit
+from colorama import Fore, Style
+
+# === Setup ===
+os.environ["OMP_NUM_THREADS"] = "1"
+np.seterr(all='raise')
+
+start_time = time.time()
+caffeinate_proc = subprocess.Popen(['caffeinate', '-di'])
+atexit.register(caffeinate_proc.terminate)
+
+# === Config ===
+block_size = 32
+batch_size = 64
+n_embd = 128
+n_head = 4
+n_layer = 4
+lr = 3e-4
+steps = 2000
+preview_every = 1
+warmup_steps = 100
+save_path = "model_arj.json"
 
 
-def save_model(model, path):
-    params = []
-    for p in model.parameters():
-        params.append({
-            'data': p.data,
-            'requires_grad': p.requires_grad
-        })
-    with open(path, 'w') as f:
-        json.dump(params, f)
-    print(f"✅ Model saved to {path}")
-
-# === Pattern Dataset ===
-def generate_pattern_sample():
-    kind = random.choice(['add', 'double', 'fib'])
-    if kind == 'add':
-        a = random.randint(1, 50)
-        step = random.randint(1, 10)
-        return [a, a + step, a + 2 * step, a + 3 * step], [a + 4 * step]
-    elif kind == 'double':
-        a = random.randint(1, 10)
-        return [a, a * 2, a * 4, a * 8], [a * 16]
-    elif kind == 'fib':
-        a = random.randint(1, 10)
-        b = random.randint(1, 10)
-        return [a, b, a + b, a + 2 * b], [2 * a + 3 * b]
-
-
-def print_weight_equations(epoch, lr, param_count):
-    print(f"\n[Epoch {epoch}] Weight Update Equations:")
-    for i in range(param_count):
-        print(f"W{i}_new = W{i}_old - {lr} * dL/dW{i}")
-
-# === Training Data ===
-train_inputs, train_targets = [], []
-for _ in range(500):
-    x, y = generate_pattern_sample()
-    train_inputs.append([v / 100 for v in x])
-    train_targets.append([y[0] / 100])
-
-inputs = ArjTensor(train_inputs, requires_grad=True)
-targets = ArjTensor(train_targets, requires_grad=True)
-
-# === Test Sequences ===
-test_samples = [
-    [2, 4, 6, 8],
-    [3, 6, 12, 24],
-    [1, 2, 3, 4],
-    [5, 10, 15, 20],
-    [2, 3, 5, 8],
-    [2, 4, 8, 16]
-]
-test_inputs = [[v / 100 for v in x] for x in test_samples]
-test_tensor = ArjTensor(test_inputs, requires_grad=False)
-
-
-# === Ground Truth (optional, for plotting)
-def true_next_value(seq):
-    if seq[1] - seq[0] == seq[2] - seq[1] == seq[3] - seq[2]:
-        return seq[3] + (seq[1] - seq[0])
-    elif seq[1] == seq[0] * 2 and seq[2] == seq[1] * 2 and seq[3] == seq[2] * 2:
-        return seq[3] * 2
-    elif seq[2] == seq[0] + seq[1] and seq[3] == seq[1] + seq[2]:
-        return seq[2] + seq[3]
-    else:
-        return None
-
-
-actual = [true_next_value(seq) for seq in test_samples]
-
-# === Model ===
-use_transformer = False
-if use_transformer:
-    print("Using Transformer")
-    model = PatternTransformer()
-else:
-    print("No transformer")
-    model = Sequential(
-        Linear(in_features=4, out_features=32),
-        ReLU(),
-        Linear(in_features=32, out_features=1)
+def pretty_log(step, loss, ema, lr, batch_size, steps):
+    elapsed = time.time() - start_time
+    per_step = elapsed / step
+    eta = per_step * (steps - step)
+    print(
+        f"{Fore.RED}Step {step:04d}/{steps} "
+        f"{Fore.YELLOW}Loss: {loss:.4f} "
+        f"{Fore.BLUE}EMA: {ema:.4f} "
+        f"{Fore.CYAN}LR: {lr:.6f} "
+        f"{Fore.GREEN}Batch: {batch_size} "
+        f"{Fore.MAGENTA}ETA: {eta / 60:.1f} min{Style.RESET_ALL}"
     )
 
-loss_fn = MSELoss()
-optimizer = SGD(model.parameters(), lr=0.01, use_adam=True)
 
-# === Matplotlib Setup ===
-fig, ax = plt.subplots(figsize=(10, 5))
-labels = [str(s) for s in test_samples]
-x = list(range(len(labels)))
-bar_actual = ax.bar(x, actual, width=0.4, label='Actual', align='center')
-bar_pred = ax.bar([i + 0.4 for i in x], [0] * len(x), width=0.4, label='Predicted', align='center', color='orange')
-ax.set_xticks([i + 0.2 for i in x])
-ax.set_xticklabels(labels, rotation=45)
-ax.set_ylim(0, max(actual) * 1.5)
-ax.set_ylabel("Next Value")
-ax.set_title("Live Prediction vs Actual")
-ax.legend()
-plt.tight_layout()
+def top_k_logits(logits, k):
+    logits = np.array(logits)
+    top_k_mask = logits < np.partition(logits, -k, axis=1)[:, -k][:, None]
+    logits[top_k_mask] = -np.inf
+    return logits
 
 
-# === Update Plot Function ===
-def update_plot(epoch):
-    pred = model(test_tensor)
-    predicted = [p[0] * 100 for p in pred.data]
-    for bar, height in zip(bar_pred, predicted):
-        bar.set_height(height)
-    ax.set_title(f"Live Prediction vs Actual (Epoch {epoch})")
+def top_p_logits(logits, p):
+    logits = np.array(logits)
+    exp_logits = np.exp(logits - np.max(logits, axis=1, keepdims=True))
+    probs = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+    sorted_indices = np.argsort(-probs, axis=1)
+    sorted_probs = np.take_along_axis(probs, sorted_indices, axis=1)
+    cum_probs = np.cumsum(sorted_probs, axis=1)
+    mask = cum_probs > p
+    mask[:, 0] = False
+    cutoff_indices = np.take_along_axis(sorted_indices, mask, axis=1)
+    batch_indices = np.repeat(np.arange(logits.shape[0]), cutoff_indices.shape[1])
+    logits[batch_indices, cutoff_indices.flatten()] = -np.inf
+    return logits
 
 
-# === Training + Animation Loop ===
-loss_values = []
-for epoch in range(1, 10001):
-    pred = model(inputs)
-    loss = loss_fn(pred, targets)
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
-    loss_values.append(loss.data)
+# === Model ===
+class TransformerModel:
+    def __init__(self, vocab_size, block_size, n_embd, n_head, n_layer):
+        self.token_emb = Embedding(vocab_size, n_embd)
+        self.pos_emb = Embedding(block_size, n_embd)
+        self.transformer = PatternTransformer(seq_len=block_size, embed_dim=n_embd, heads=n_head, layers=n_layer)
+        self.ln = LayerNorm(n_embd)
+        self.head = Linear(n_embd, vocab_size)
 
-    if epoch % 1 == 0:
-        print(f"Epoch {epoch}: Loss = {loss.data:.6f}")
-        pred = model(test_tensor)
-        print_weight_equations(epoch + 1, lr = 0.01, param_count = len(model.parameters()))
-        for seq, out, target in zip(test_samples, pred.data, actual):
-            print(f"{seq} → predicted: {out[0] * 100:.2f} | actual: {target:.2f}")
-        save_model(model, 'pattern_model.json')
-        print("Model saved")
-        update_plot(epoch)
-        plt.pause(0.01)
+    def __call__(self, x: ArjTensor):
+        B, T = len(x.data), len(x.data[0])
+        pos_ids = np.tile(np.arange(T), (B, 1))
+        pos_ids = np.clip(pos_ids, 0, self.pos_emb.weight.shape[0] - 1)
+        tok = self.token_emb(x)
+        pos = self.pos_emb(ArjTensor(pos_ids))
+        x = tok + pos
+        x = self.transformer(x)
+        x = self.ln(x)
+        out = self.head(x)
+        return out
 
-# === Final Predictions ===
-print("\n--- Final Predictions ---")
-final_pred = model(test_tensor)
-for seq, out, target in zip(test_samples, final_pred.data, actual):
-    print(f"{seq} → predicted: {out[0] * 100:.2f} | actual: {target:.2f}")
-save_model(model, 'pattern_model.json')
-print("Model saved")
-plt.show()
+    def parameters(self):
+        return (
+            self.token_emb.parameters() +
+            self.pos_emb.parameters() +
+            self.transformer.parameters() +
+            self.ln.parameters() +
+            self.head.parameters()
+        )
+
+    def generate(self, prompt_ids, max_new=30, temperature=1.0, top_k=None, top_p=None, repetition_penalty=1.2):
+        x = ArjTensor([prompt_ids], requires_grad=False)
+        generated = list(prompt_ids)
+        for _ in range(max_new):
+            logits = self(x)
+            last = logits.data[0][-1]
+
+            for token_id in generated:
+                last[int(token_id)] /= repetition_penalty
+
+            if top_k:
+                last = top_k_logits([last], top_k)[0]
+            if top_p:
+                last = top_p_logits([last], top_p)[0]
+
+            logits_np = np.array(last) / temperature
+            exp_logits = np.exp(logits_np - np.max(logits_np))
+            probs = exp_logits / np.sum(exp_logits)
+            next_id = np.random.choice(len(probs), p=probs)
+
+            generated.append(next_id)
+            x.data = [x.data[0] + [next_id]]
+        return generated
 
 
+if __name__ == "__main__":
+    print("Loading dataset...")
+    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+    text = " ".join(x["text"] for x in ds if x["text"]).lower()
+    tokens = re.findall(r"\b[a-z0-9]+\b", text)
 
-# === Final Loss Plot ===
-plt.figure()
-plt.plot(loss_values)
-plt.title("Training Loss")
-plt.xlabel("Epoch")
-plt.ylabel("Loss")
-plt.grid(True)
-plt.show()
+    vocab_path = "vocab.json"
+
+    # === Load or rebuild vocab ===
+    if os.path.exists(vocab_path):
+        try:
+            with open(vocab_path) as f:
+                vocab_raw = json.load(f)
+                vocab = vocab_raw["vocab"]
+            print("✅ Loaded existing vocab.")
+        except Exception as e:
+            print(f"⚠️ Failed to load vocab.json: {e}")
+            vocab = None
+    else:
+        vocab = None
+
+    if vocab is None:
+        print("🔁 Rebuilding vocab from dataset...")
+        vocab = {"<unk>": 0}
+        idx2word = ["<unk>"]
+        for word in tokens:
+            if word not in vocab:
+                vocab[word] = len(vocab)
+                idx2word.append(word)
+        with open(vocab_path, "w") as f:
+            json.dump({"vocab": vocab}, f)
+        print(f"✅ Saved vocab.json with {len(vocab)} tokens.")
+    else:
+        vocab_size = len(vocab)
+        idx2word = [""] * vocab_size
+        for word, idx in vocab.items():
+            if idx < len(idx2word):
+                idx2word[idx] = word
+
+    encoded = [vocab.get(word, 0) for word in tokens]  # Use 0 for <unk>
+    unk_count = encoded.count(0)
+    if unk_count > 0:
+        print(f"⚠️ {unk_count} unknown words mapped to <unk>")
+
+    vocab_size = len(vocab)
+    print(f"Vocab size: {vocab_size}")
+
+    def get_batch():
+        starts = np.random.randint(0, len(encoded) - block_size - 1, size=batch_size)
+        x = np.array([encoded[start:start + block_size] for start in starts])
+        y = np.array([encoded[start + 1:start + 1 + block_size] for start in starts])
+        return ArjTensor(x, requires_grad=True), ArjTensor(y)
+
+    model = TransformerModel(vocab_size, block_size, n_embd, n_head, n_layer)
+
+    try:
+        with open(save_path, "r") as f:
+            loaded_state = json.load(f)
+        for p, saved in zip(model.parameters(), loaded_state):
+            p.data = np.array(saved["data"], dtype=np.float32)
+            p.requires_grad = saved["requires_grad"]
+        print("✅ Loaded saved model.")
+    except FileNotFoundError:
+        print("⚠️ No saved model found, starting fresh.")
+
+    loss_fn = CrossEntropyLoss()
+    optimizer = SGD(model.parameters(), lr=lr, use_adam=True)
+
+    print("🚀 Training started...")
+    best_loss = float("inf")
+    ema_loss = None
+
+    for step in range(1, steps + 1):
+        step_start = time.time()
+
+        # Learning rate warmup
+        if step <= warmup_steps:
+            optimizer.set_lr(lr * step / warmup_steps)
+
+        xb, yb = get_batch()
+        logits = model(xb)
+        loss = loss_fn(logits, yb)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        step_time = time.time() - step_start
+        loss_val = loss.data
+        ema_loss = loss_val if ema_loss is None else 0.9 * ema_loss + 0.1 * loss_val
+
+        if step % 10 == 0:
+            pretty_log(step, loss_val, ema_loss, optimizer.lr, batch_size, steps)
+            print(f"⏱️ Step time: {step_time:.3f} sec")
+
+        if step % preview_every == 0:
+            prompt = xb.data[0][:8]
+            out_ids = model.generate(prompt, max_new=20, top_k=10, temperature=0.8)
+            print("Prompt:     ", " ".join(idx2word[int(i)] for i in prompt))
+            print("Generated:  ", " ".join(idx2word[int(i)] for i in out_ids))
+            print()
+
+        if loss_val < best_loss and step % 50 == 0:
+            best_loss = loss_val
+            state = [{
+                'data': p.data.tolist() if hasattr(p.data, 'tolist') else p.data,
+                'requires_grad': p.requires_grad
+            } for p in model.parameters()]
+            with open(save_path, "w") as f:
+                json.dump(state, f)
+            print(f"✅ Saved best model (loss {best_loss:.4f})")
+
+    print("🎉 Training complete.")
