@@ -1,42 +1,91 @@
+import os
 import json
-from arj_torch.tensor import ArjTensor
-from arj_torch.nn import Linear, ReLU, Sequential
+import re
+import numpy as np
+from datasets import load_dataset
+from train import TransformerModel
 
-# === Define the same model architecture as used during training ===
-model = Sequential(
-    Linear(in_features=4, out_features=32),
-    ReLU(),
-    Linear(in_features=32, out_features=1)
+# === Config (must match training) ===
+block_size = 32
+n_embd = 128
+n_head = 4
+n_layer = 4
+model_path = "model_arj.json"
+vocab_path = "vocab.json"
+
+# === Step 1: Load or Rebuild Vocabulary ===
+if os.path.exists(vocab_path):
+    print("📦 Loading existing vocabulary...")
+    with open(vocab_path, "r") as f:
+        vocab_data = json.load(f)
+        vocab = vocab_data["vocab"]
+        # 🧠 Rebuild idx2word from vocab
+        vocab_size = len(vocab)
+        idx2word = [""] * vocab_size
+        for word, idx in vocab.items():
+            if idx < vocab_size:
+                idx2word[idx] = word
+
+else:
+    print("📚 Rebuilding vocabulary...")
+    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+    text = " ".join(x["text"] for x in ds if x["text"]).lower()
+    tokens = re.findall(r"\b\w+\b", text)
+
+    vocab = {"<unk>": 0}
+    idx2word = ["<unk>"]
+    encoded = []
+
+    for word in tokens:
+        if word not in vocab:
+            vocab[word] = len(vocab)
+            idx2word.append(word)
+        encoded.append(vocab[word])
+
+    vocab_size = len(vocab)
+    with open(vocab_path, "w") as f:
+        json.dump({"vocab": vocab, "idx2word": idx2word}, f)
+    print("✅ Saved vocabulary to vocab.json")
+
+print(f"✅ Vocab size: {vocab_size}")
+
+# === Step 2: Load Model ===
+model = TransformerModel(
+    vocab_size=vocab_size,
+    block_size=block_size,
+    n_embd=n_embd,
+    n_head=n_head,
+    n_layer=n_layer
 )
 
-# === Load model parameters ===
-def load_model(model, path):
-    with open(path, 'r') as f:
-        param_data = json.load(f)
+with open(model_path, "r") as f:
+    state = json.load(f)
 
-    for p, saved in zip(model.parameters(), param_data):
-        p.data = saved['data']
-        p.requires_grad = saved['requires_grad']
-    print(f"📥 Model loaded from {path}")
+for param, saved in zip(model.parameters(), state):
+    param.data = np.array(saved["data"], dtype=np.float32)
+    param.requires_grad = saved["requires_grad"]
 
-load_model(model, "pattern_model.json")  # Path to your saved model
+print("✅ Loaded model weights.")
 
-# === Take user input ===
-user_input = input("Enter 4 numbers separated by spaces: ")
-try:
-    numbers = list(map(float, user_input.strip().split()))
-    if len(numbers) != 4:
-        raise ValueError
-except ValueError:
-    print("❌ Please enter exactly 4 valid numbers.")
-    exit()
+# === Step 3: Tokenization Helpers ===
+def tokenize(text):
+    return [vocab.get(w, 0) for w in re.findall(r"\b\w+\b", text.lower())]
 
-# === Normalize input ===
-norm_input = [[v / 100 for v in numbers]]  # shape: (1, 4)
-input_tensor = ArjTensor(norm_input, requires_grad=False)
+def detokenize(token_ids):
+    return " ".join(idx2word[i] if i < len(idx2word) else "<unk>" for i in token_ids)
 
-# === Make prediction ===
-output = model(input_tensor)
-prediction = output.data[0][0] * 100  # De-normalize
 
-print(f"📊 Predicted next number: {round(prediction):.2f}")
+# === Step 4: Inference Loop ===
+print("\n🔍 Inference ready!")
+while True:
+    prompt = input("📝 Enter prompt (or empty to quit): ").strip()
+    if not prompt:
+        break
+
+    prompt_ids = tokenize(prompt)[-block_size:]  # trim to last N tokens
+    out_ids = model.generate(prompt_ids, max_new=30, top_k=10, temperature=0.8)
+    generated_text = detokenize(out_ids)
+
+    print("\n📤 Output:")
+    print(generated_text)
+    print("-" * 40)
