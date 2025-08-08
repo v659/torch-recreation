@@ -15,8 +15,6 @@ os.environ["OMP_NUM_THREADS"] = "1"
 np.seterr(all='raise')
 
 start_time = time.time()
-caffeinate_proc = subprocess.Popen(['caffeinate', '-di'])
-atexit.register(caffeinate_proc.terminate)
 
 # === Config ===
 block_size = 32
